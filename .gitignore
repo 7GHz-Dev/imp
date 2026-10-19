@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# รหัสผ่าน NETBAY
+config.ini
+
+# ฐานข้อมูลเลขเครื่อง (ข้อมูลรถจริง)
+data/engine.db*
+*.csv
+
+# ไฟล์ที่โปรแกรมสร้าง
+output/
+work/
+
+# invoice / MASTER template จริง (มีข้อมูลลูกค้า) — ใส่ไว้ในเครื่องเพื่อรันเทสต์ชุดเต็ม
+tests/fixtures/
