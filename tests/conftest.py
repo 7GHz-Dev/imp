@@ -34,6 +34,15 @@ TARIFF = [  # trf_num, trf_code, brand, model, fuel, cc_start, cc_end, w_start, 
 ]
 
 
+def serve(app):
+    """รัน Flask app ในเธรดพื้นหลัง  คืน (server, url)"""
+    import threading
+    from werkzeug.serving import make_server
+    srv = make_server('127.0.0.1', 0, app, threaded=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, 'http://127.0.0.1:%d' % srv.server_port
+
+
 def fixture(name):
     p = os.path.join(FIXTURES, name)
     if not os.path.isfile(p):

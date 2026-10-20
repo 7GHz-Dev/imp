@@ -1,22 +1,15 @@
 # -*- coding: utf-8 -*-
 """ทดสอบผ่านหน้าเว็บจริงด้วย Playwright: อัปโหลด -> สร้าง CSV -> ดาวน์โหลด -> ส่งเข้า NETBAY (จำลอง)"""
 import dataclasses
-import threading
+import datetime
 
 import pytest
 from openpyxl import Workbook
 from playwright.sync_api import expect, sync_playwright
-from werkzeug.serving import make_server
 
 from app import create_app
-from conftest import make_msfz
+from conftest import make_msfz, serve
 from mock_netbay import IMPORTER, create_mock
-
-
-def serve(app):
-    srv = make_server('127.0.0.1', 0, app, threaded=True)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, 'http://127.0.0.1:%d' % srv.server_port
 
 
 @pytest.fixture
@@ -27,7 +20,10 @@ def site(settings):
     s = dataclasses.replace(settings, netbay=nb)
     app_srv, app_url = serve(create_app(s))
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel='chrome')   # Google Chrome ในเครื่อง (ตัวเดียวกับที่โปรแกรมใช้)
+        try:
+            browser = p.chromium.launch(channel='chrome')   # Google Chrome ในเครื่อง (ตัวเดียวกับที่โปรแกรมใช้)
+        except Exception:
+            browser = p.chromium.launch()
         page = browser.new_page(accept_downloads=True)
         page.goto(app_url)
         yield page, mock.state
@@ -72,7 +68,9 @@ def test_upload_create_csv_and_send_to_netbay(site, tmp_path):
         ('OOCL BANGKOK', 'XXXX', 'TESTBL0001', 'JP', '2836')
     assert (d['pkg_amount'], d['pkg_unit'], d['gw1'], d['gw2'], d['price'], d['currency']) == \
         ('3', 'UN', '4330', '4330', '1022700.5', 'JPY')
+    assert d['arrival'] == datetime.date.today().strftime('%d-%m-%Y')
     assert netbay['upload'][1] == csv_bytes
+    assert netbay['refresh'] == 1
     assert netbay['popups'] == [('gw', 'true'), ('duty', 'true'), ('vat', 'true')]
     assert netbay['recalc'] == ['avg', 'tax', 'cif']
 

@@ -108,6 +108,30 @@ CSV ตรงกับโปรแกรมเดิมทุกคอลัม�
 ค่าหัวใบขน (เรือ, voyage, ประเทศ, บริษัท) ตั้งใน `config.ini` หัวข้อ `[netbay]`
 ทดสอบกับ NETBAY จำลองที่สร้างตามโครงหน้าเว็บเดิม ([tests/mock_netbay.py](tests/mock_netbay.py))
 
+## สร้าง Draft ใบขนจาก ERP-KOLA (worker)
+
+PAINT กด **สร้าง Draft** ที่ ERP-KOLA → งานคงค้าง → 3. Draft ใบขน → งานเข้าคิวพร้อมไฟล์ Final Invoice
+`worker.py` รันบนเครื่องในออฟฟิศที่เปิด NETBAY ได้ ถาม ERP เป็นระยะ (ต่อออกไปฝั่งเดียว ไม่ต้องเปิด port) แล้วทำ
+
+1. ตรวจ invoice ตามหัวข้อ "ตรวจก่อนสร้างไฟล์" + เลข BL ต้องตรงกับงาน + ทุกคันต้องได้พิกัด
+2. สุ่มเลขเครื่อง เติมลง Excel และสร้าง CSV (`output/`) — chassis ที่เคยได้เลขใน BL เดียวกันใช้เลขเดิม
+3. สร้างใบขนใน NETBAY แนบ CSV รวมยอด คำนวณใหม่ แล้ว **กด Save** (ไม่กด Send to Customs)
+4. ส่ง **Reference No.** (เช่น `QENX000000019`) และ FN Invoice ที่เติมเลขเครื่องแล้วกลับเข้างาน
+
+ไม่ผ่านข้อไหน งานใน ERP ขึ้น "สร้าง Draft ไม่สำเร็จ" พร้อมเหตุผล แก้ไฟล์แล้วกดสร้างใหม่ได้
+ถ้า NETBAY ล้มกลางทาง เหตุผลจะบอกเลขใบขนที่สร้างค้างไว้
+
+ตั้งค่าใน `config.ini`
+
+```ini
+[erp]
+url = https://erp-kola.vercel.app
+api_key = <WORKER_API_KEY ตัวเดียวกับบน Vercel>
+```
+
+เปิดด้วย `run_worker.bat` (หรือ `python worker.py`, ทดสอบ 1 งาน: `--once`)
+แท็บ Draft ใบขนบน ERP บอกว่า worker ออนไลน์อยู่ไหม ทำงานไหนอยู่
+
 ## โครงสร้าง
 
 ```
@@ -121,6 +145,7 @@ core/excel_out.py    เติมเลขเครื่องลง Excel (Mic
 core/netbay_csv.py   mapping → CSV
 core/pipeline.py     รวมขั้นตอน ตรวจ → สุ่มเลข → เขียนไฟล์
 core/netbay.py       ส่งเข้า NETBAY (Playwright)
+worker.py            รับงานสร้าง Draft ใบขนจาก ERP-KOLA
 tools/import_db.py   นำเข้าเลขเครื่องเดิมจาก SQL Server export
 ```
 

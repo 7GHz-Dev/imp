@@ -23,6 +23,15 @@ class NetbaySettings:
 
 
 @dataclass
+class ErpSettings:
+    """ERP-KOLA ที่ worker.py ไปรับงาน Draft ใบขน"""
+    url: str
+    api_key: str
+    worker_name: str
+    poll_seconds: int
+
+
+@dataclass
 class Settings:
     db_path: str
     output_dir: str
@@ -35,6 +44,7 @@ class Settings:
     host: str
     port: int
     netbay: NetbaySettings
+    erp: ErpSettings = None
 
 
 def load(path=None):
@@ -70,5 +80,11 @@ def load(path=None):
             origin_country=nb.get('origin_country', 'JP'),
             release_port=nb.get('release_port', ''),
             headless=nb.getboolean('headless', fallback=False),
+        ),
+        erp=ErpSettings(
+            url=cfg.get('erp', 'url', fallback='https://erp-kola.vercel.app').rstrip('/'),
+            api_key=cfg.get('erp', 'api_key', fallback=''),
+            worker_name=cfg.get('erp', 'worker_name', fallback=''),
+            poll_seconds=cfg.getint('erp', 'poll_seconds', fallback=20),
         ),
     )

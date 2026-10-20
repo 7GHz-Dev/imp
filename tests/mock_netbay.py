@@ -13,7 +13,12 @@ IMPORTER = 'บริษัท เเม่สอด ฟรีโซน จำ�
 
 def create_mock():
     app = Flask(__name__)
-    state = {'login': None, 'decl': None, 'upload': None, 'popups': [], 'recalc': []}
+    state = {'login': None, 'decl': None, 'upload': None, 'refresh': 0, 'popups': [], 'recalc': [], 'saved': 0}
+    ref_no = 'QENX000000099'
+    # หน้าหัวใบขนจริงมีเลข Reference No. ตั้งแต่กด New และปุ่ม F12 [Save]
+    save_bar = ('<input id="referenceNo" name="referenceNo" value="%s">'
+                '<input id="saveBTN" type="button" value="F12 [Save]" '
+                'onclick="fetch(\'/save\').then(() => location.reload())">' % ref_no)
     app.state = state
 
     @app.get('/')
@@ -34,7 +39,7 @@ def create_mock():
     @app.get('/import')
     def import_page():
         return '''<html><body>
-<button id="newBTN" onclick="document.getElementById('area').style.display='block';detailfrm.location='/decl'">New</button>
+<button id="newBTN" onclick="document.getElementById('area').style.display='block';detailfrm.location='/decl?ImDclCtrl=16399'">New</button>
 <div id="area" style="display:none">
  <div id="outLineTree"><font><div><table><tbody><tr><td><div><font><b>
    <span onclick="detailfrm.location='/header'">ROOT</span></b></font></div></td></tr></tbody></table></div></font></div>
@@ -43,6 +48,7 @@ def create_mock():
  <button id="AutoRecalTax" onclick="detailfrm.location='/busy?w=tax'">Tax</button>
  <button id="sumCif2Inv" onclick="detailfrm.location='/busy?w=cif'">CIF</button>
  <iframe id="detailfrm" name="detailfrm" width="900" height="700"></iframe>
+ <input id="sendCustomsBTN" type="button" value="Send to Customs" onclick="fetch('/send_customs')">
 </div></body></html>'''
 
     @app.get('/decl')
@@ -58,7 +64,8 @@ def create_mock():
             row(['vessel', '<input name="vessel">']),
             row(['voyage', '<input id="ins_voyage" name="voyage">', 'bl', '<input name="bl">']),
             row(['origin', '<input name="origin1">', 'origin2', '<input name="origin2">']),
-            row(['arrival', '<input id="ins_arrivalDate" name="arrival">', 'port', '<input name="release_port">']),
+            row(['arrival', '<input id="ins_arrivalDate" name="arrival" value="00-00-0000" maxlength="10" '
+                 'style="width: 80px">', 'port', '<input name="release_port">']),
             row(['pkg', '<font><input name="pkg_amount"><input name="pkg_unit"></font>']),
             row(['r11']),
             row(['gw', '<font><input name="gw1"></font>']),
@@ -66,7 +73,7 @@ def create_mock():
         ] + [row(['r%d' % i]) for i in range(14, 19)] + [
             row(['price', '<font><input name="price"><input name="currency"></font>']),
         ]
-        return '''<html><body>
+        return '''<html><body>%s
 <div id="declTypeID"><font><select name="decl_type"><option value="">-</option><option value="610">610</option></select></font></div>
 <div id="declarationDIV"><table><tbody>%s</tbody></table></div>
 <div id="list" style="display:none"><table><tbody>
@@ -74,13 +81,30 @@ def create_mock():
 </tbody></table></div>
 <div id="importerDetail"><font><input name="importer_name"></font></div>
 <button id="addInvoice" onclick="save()">Add invoice</button>
+<input id="refreshInvBTN" type="button" value="Refresh" style="display:none">
 <script>
+// ช่องวันที่มี input mask แบบหน้าจริง: ว่าง = __-__-____  ตัวเลขลงที่ตำแหน่ง cursor  ข้าม '-'  ไม่ครบตอน blur = ล้าง
+const MASK = '__-__-____', date = document.getElementById('ins_arrivalDate');
+date.addEventListener('focus', () => { if (date.value === '00-00-0000' || date.value === '') date.value = MASK; });
+date.addEventListener('input', () => { if (date.value === '') date.value = MASK; });
+date.addEventListener('blur', () => { if (date.value.includes('_')) date.value = ''; });
+date.addEventListener('keydown', e => {
+  if (e.key.length !== 1) return;                       // Home, Tab, ลูกศร ... ทำงานตามปกติ
+  e.preventDefault();
+  if (!/[0-9]/.test(e.key)) return;
+  let i = date.selectionStart;
+  while (i < MASK.length && MASK[i] !== '_') i++;
+  if (i >= MASK.length) return;
+  date.value = date.value.slice(0, i) + e.key + date.value.slice(i + 1);
+  i++; while (i < MASK.length && MASK[i] !== '_') i++;
+  date.setSelectionRange(i, i);
+});
 function save() {
   const data = new URLSearchParams();
   document.querySelectorAll('input,select').forEach(e => data.append(e.name, e.value));
   fetch('/save_decl', {method: 'POST', body: data}).then(() => location = '/upload_form');
 }
-</script></body></html>''' % (''.join(rows), IMPORTER)
+</script></body></html>''' % (save_bar, ''.join(rows), IMPORTER)
 
     @app.post('/save_decl')
     def save_decl():
@@ -104,11 +128,28 @@ function save() {
     def upload():
         f = request.files['file']
         state['upload'] = (f.filename, f.read())
-        return '<html><body>uploaded</body></html>'
+        return '''<html><body>uploaded
+<input id="refreshInvBTN" type="button" value="Refresh" onclick="fetch('/refresh').then(() => location = '/header')">
+</body></html>'''
+
+    @app.get('/refresh')
+    def refresh():
+        state['refresh'] += 1
+        return 'ok'
 
     @app.get('/header')
     def header():
-        return '<html><body>header</body></html>'
+        return '<html><body>header %s</body></html>' % save_bar
+
+    @app.get('/save')
+    def save():
+        state['saved'] += 1
+        return 'ok'
+
+    @app.get('/send_customs')
+    def send_customs():
+        state['sent_to_customs'] = True
+        return 'ok'
 
     @app.get('/summary')
     def summary():

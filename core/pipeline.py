@@ -19,12 +19,14 @@ from .excel_out import write_engines
 from .invoice import Car, EngineCell, Invoice, read_invoice
 from .values import clean, fmt_number
 
-NEW, REUSE, KEEP = 'new', 'reuse', 'keep'
+NEW, REUSE, KEEP, AGAIN = 'new', 'reuse', 'keep', 'again'
 STATUS_TEXT = {
     NEW: 'สุ่มใหม่',
     REUSE: 'ใช้เลขเดิม',      # เลขในไฟล์เคยออกให้ chassis นี้แล้ว
     KEEP: 'มีเลขแล้ว',        # เลขครบในไฟล์แต่ไม่อยู่ในฐานข้อมูล -> ใช้ตามไฟล์และบันทึกเพิ่ม
+    AGAIN: 'ใช้เลขเดิมของ BL นี้',  # reuse_bl: ไฟล์ยังไม่มีเลข แต่ chassis เคยได้เลขใน BL เดียวกัน -> เติมเลขเดิม
 }
+FILL = (NEW, AGAIN)            # สถานะที่ต้องเติมเลขลงช่องเลขเครื่องและ use_desc_good2
 
 
 @dataclass
@@ -40,7 +42,7 @@ class Line:
         return self.full_engine or '%s-xxxxxxx' % self.engine.head
 
     def desc2_full(self):
-        return NC.add_number(self.car.desc2, self.number) if self.status == NEW else self.car.desc2
+        return NC.add_number(self.car.desc2, self.number) if self.status in FILL else self.car.desc2
 
 
 @dataclass
@@ -78,7 +80,9 @@ def _tariff_rows(inv, settings):
     return _tariff_cache[key]
 
 
-def analyze(path, settings, db):
+def analyze(path, settings, db, reuse_bl=False):
+    """reuse_bl=True (worker ของ ERP): chassis ที่เคยได้เลขใน BL เดียวกัน ใช้เลขเดิม ไม่สุ่มใหม่
+    — PAINT สร้าง Draft ซ้ำจาก Final Invoice ฉบับเดิมหรือฉบับแก้ เลขเครื่องจึงไม่เปลี่ยนไปเรื่อย ๆ"""
     inv = read_invoice(path)
     a = Analysis(invoice=inv, errors=list(inv.errors), warnings=list(inv.warnings))
     if not inv.cars or not inv.engines:
@@ -141,7 +145,15 @@ def analyze(path, settings, db):
             seen_numbers[line.number] = car.car_no
         else:
             old = db.history(car.chassis)
-            if old:
+            same = [r for r in old if reuse_bl and _norm(r['BL_NO'] or '') == _norm(inv.bl_no)
+                    and (r['FULL_ENG'] or '') == '%s-%s' % (eng.head, r['RANDOM_ENG'])]
+            if same:
+                line.status = AGAIN
+                line.number, line.full_engine = same[0]['RANDOM_ENG'], same[0]['FULL_ENG']
+                if line.number in seen_numbers:
+                    a.errors.append('%s: เลข %s ซ้ำกับคันที่ %d' % (tag, line.number, seen_numbers[line.number]))
+                seen_numbers[line.number] = car.car_no
+            elif old:
                 a.warnings.append('%s: chassis นี้เคยได้เลข %s (%s) — รอบนี้จะสุ่มเลขใหม่ '
                                   'ถ้าต้องการเลขเดิมให้อัปโหลดไฟล์ Excel ที่ได้จากรอบก่อน'
                                   % (tag, old[0]['FULL_ENG'], (old[0]['DATE_RAN'] or '')[:10]))
@@ -173,8 +185,8 @@ def _safe(name):
     return re.sub(r'[^\w.-]+', '_', name).strip('_') or 'invoice'
 
 
-def commit(path, settings, db, original_name=''):
-    a = analyze(path, settings, db)
+def commit(path, settings, db, original_name='', reuse_bl=False):
+    a = analyze(path, settings, db, reuse_bl=reuse_bl)
     if not a.ok:
         raise AnalysisError(a)
     inv = a.invoice
@@ -197,6 +209,7 @@ def commit(path, settings, db, original_name=''):
                 if line.status == NEW:
                     line.number, line.full_engine = tx.issue(
                         line.engine.head, line.car.chassis, inv.bl_no, inv.invoice_no, source)
+                if line.status in FILL:
                     updates.append((line.engine.row, line.engine.col, line.engine.value_with(line.full_engine)))
                 elif line.status == KEEP:
                     tx.add(line.number, line.full_engine, line.car.chassis, inv.bl_no, inv.invoice_no, source)

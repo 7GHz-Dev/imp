@@ -5,9 +5,11 @@
 ขั้นตอนและ XPath ยกมาจาก csv_to_netbay() ของโปรแกรมเดิม (Selenium):
   login -> หน้า import -> สร้างใบขนใหม่ (610) -> กรอกหัวใบขน -> แนบ CSV
   -> รวมน้ำหนัก/อากร/VAT จากทุก invoice -> คำนวณใหม่
-หยุดก่อนกด Save ให้คนตรวจบนหน้าจอ แล้วปิดหน้าต่างเอง
+หน้าเว็บ imp: หยุดก่อนกด Save ให้คนตรวจบนหน้าจอ แล้วปิดหน้าต่างเอง
+worker.py (save=True): กด F12 [Save] ให้เอง — ไม่กด Send to Customs ไม่ว่ากรณีใด
 """
 import datetime
+import re
 import time
 
 from playwright.sync_api import TimeoutError as PWTimeout
@@ -18,6 +20,9 @@ TREE_ROOT = 'xpath=//*[@id="outLineTree"]/font/div/table/tbody/tr[1]/td/div/font
 IMPORT_LINK = 'xpath=//*[@id="smoothmenu1"]/ul/li[3]/ul/li[5]/a'
 LOGIN_AREA = 'xpath=/html/body/map/area'
 UPLOAD_BTN = 'xpath=/html/body/table/tbody/tr[4]/td[2]/div/form/table/tbody/tr/td/table/tbody/tr[5]/td[2]/input[2]'
+REFRESH_BTN = '#refreshInvBTN'
+SAVE_BTN = '#saveBTN'                 # F12 [Save] ในหน้าหัวใบขน
+REF_NO = '#referenceNo'               # Reference No. ของใบขน เช่น QENX000000019 (มีตั้งแต่กด New)
 BUSY_CELL = 'xpath=//*[@id="mybody"]/center/table/tbody/tr/td[2]'
 DONE_IMG = 'xpath=/html/body/center/table/tbody/tr/td[2]/center/img'
 
@@ -26,34 +31,59 @@ class NetbayError(Exception):
     pass
 
 
-def upload(csv_path, bl_no, totals, s, log=print, wait_close=None):
-    """s = NetbaySettings  totals = ยอดรวมจาก netbay_csv.totals()"""
+def upload(csv_path, bl_no, totals, s, log=print, wait_close=None, save=False, on_step=None, info=None):
+    """
+    s = NetbaySettings  totals = ยอดรวมจาก netbay_csv.totals()
+    save    = กด Save ให้เองหลังคำนวณใหม่ (worker ที่ไม่มีคนเฝ้าหน้าจอ)
+    on_step = เรียก on_step(page) หลังจบแต่ละขั้น (worker ใช้ถ่ายภาพหน้าจอส่งขึ้น ERP)
+    info    = dict ที่จะได้ ref_no / decl_id ของใบขนที่สร้าง — มีค่าแม้งานล้มกลางทาง
+    คืน Reference No. ของใบขน
+    """
     if not (s.url and s.username and s.password):
         raise NetbayError('ยังไม่ได้ตั้งค่า url/username/password ของ NETBAY ใน config.ini')
     if wait_close is None:
         wait_close = not s.headless
+    info = {} if info is None else info
+    step = on_step or (lambda page: None)
+
+    def on_dialog(d):
+        log('  NETBAY แจ้ง: %s' % ' '.join(d.message.split())[:300])
+        d.accept()                                   # alert ทุกอันกด OK เหมือนโปรแกรมเดิม
+
     with sync_playwright() as p:
         browser = _launch(p, s)
         try:
             context = browser.new_context(no_viewport=not s.headless)
             context.set_default_timeout(30_000)
-            context.on('dialog', lambda d: d.accept())     # alert ทุกอันกด OK เหมือนโปรแกรมเดิม
+            context.on('dialog', on_dialog)
             page = context.new_page()
             log('login NETBAY ...')
             import_url = login(page, s)
             log('สร้างใบขนใหม่ %s และกรอกหัวใบขน BL %s ...' % (s.declaration_type, bl_no))
-            new_declaration(page, import_url, s, bl_no, totals)
-            log('แนบไฟล์ CSV ...')
-            attach_csv(page, csv_path)
+            new_declaration(page, import_url, s, bl_no, totals, info)
+            log('  ใบขน Reference No. %s' % info['ref_no'])
+            step(page)
+            log('แนบไฟล์ CSV (Add Invoice → Import → Refresh) ...')
+            attach_csv(page, csv_path, log)
+            step(page)
             log('รวมน้ำหนัก / อากร / VAT จากทุก invoice ...')
             fill_totals(page, log)
+            step(page)
             log('คำนวณใหม่ (Re-avg / ภาษี / CIF) ...')
             recalculate(page, log)
-            log('เสร็จแล้ว — ตรวจข้อมูลบนหน้าจอ NETBAY แล้วกด Save เอง จากนั้นปิดหน้าต่างเบราว์เซอร์')
+            step(page)
+            if save:
+                log('กด Save ...')
+                save_declaration(page)
+                step(page)
+                log('บันทึกใบขน %s แล้ว' % info['ref_no'])
+            else:
+                log('เสร็จแล้ว — ตรวจข้อมูลบนหน้าจอ NETBAY แล้วกด Save เอง จากนั้นปิดหน้าต่างเบราว์เซอร์')
             if wait_close:
                 page.wait_for_event('close', timeout=0)
         finally:
             browser.close()
+    return info['ref_no']
 
 
 def _launch(p, s):
@@ -67,16 +97,21 @@ def _launch(p, s):
 
 
 def type_into(loc, text, click=False):
-    """ล้างช่อง แล้วพิมพ์ทีละตัว (ให้ event ของหน้าเว็บทำงานเหมือนคนพิมพ์) จนค่าในช่องตรง"""
+    """ล้างช่อง แล้วพิมพ์ทีละตัว (ให้ event ของหน้าเว็บทำงานเหมือนคนพิมพ์) จนค่าในช่องตรง
+
+    click=True ใช้กับช่องที่มี input mask (วันที่ __-__-____): คลิกแล้วกด Home ให้ cursor อยู่ต้นช่อง
+    ไม่งั้นตัวเลขไปลงตรงจุดที่คลิก (กลางช่อง) ได้ __-__-2010
+    """
     text = str(text)
     for _ in range(5):
         loc.fill('')
         if click:
             loc.click()
+            loc.press('Home')
         loc.press_sequentially(text)
         if loc.input_value() == text:
             return
-    raise NetbayError('กรอกค่า %r ไม่สำเร็จ' % text)
+    raise NetbayError('กรอกค่า %r ไม่สำเร็จ (ในช่องเป็น %r)' % (text, loc.input_value()))
 
 
 def login(page, s):
@@ -99,11 +134,18 @@ def login(page, s):
     return href
 
 
-def new_declaration(page, import_url, s, bl_no, totals):
+def new_declaration(page, import_url, s, bl_no, totals, info=None):
     page.goto(import_url)
     page.locator('#newBTN').click()
     page.locator(TREE_ROOT).wait_for(state='attached')
     f = page.frame_locator('#detailfrm')
+    if info is not None:            # กด New แล้ว NETBAY สร้างใบขนทันที จำเลขไว้ก่อน เผื่อขั้นต่อไปล้ม
+        info['ref_no'] = f.locator(REF_NO).input_value()
+        frame = page.frame('detailfrm')
+        m = re.search(r'ImDclCtrl=(\d+)', frame.url if frame else '')
+        info['decl_id'] = m.group(1) if m else ''
+        if not info['ref_no']:
+            raise NetbayError('ไม่พบ Reference No. ของใบขนที่สร้าง — หน้าเว็บ NETBAY อาจเปลี่ยน')
     f.locator('xpath=//*[@id="declTypeID"]/font/select').select_option(value=s.declaration_type)
     pick_importer(f, s)
     f.locator(D + '[5]/td[2]/select').select_option(value='1')
@@ -146,11 +188,19 @@ def click_and_wait_frame(page, locator, timeout=30_000):
         pass
 
 
-def attach_csv(page, csv_path):
+def attach_csv(page, csv_path, log):
+    """Add Invoice -> File for import (เลือก CSV) -> Import -> Refresh"""
     f = page.frame_locator('#detailfrm')
     f.locator('#addInvoice').click()
     f.locator('xpath=//*[@id="maptypeDiv2"]/input').set_input_files(csv_path)
     click_and_wait_frame(page, f.locator(UPLOAD_BTN))
+    refresh = f.locator(REFRESH_BTN)
+    try:
+        refresh.wait_for(state='visible', timeout=15_000)
+    except PWTimeout:
+        log('  ไม่พบปุ่ม Refresh หลัง Import — กด Refresh เองบนหน้าจอ')
+    else:
+        click_and_wait_frame(page, refresh, timeout=10_000)
     page.locator(TREE_ROOT).click()
 
 
@@ -203,3 +253,16 @@ def recalculate(page, log):
         if not _wait_done(f):
             log('  ไม่เห็นสัญญาณเสร็จของ %s ภายใน 10 วินาที — ตรวจบนหน้าจอ' % name)
     page.locator(TREE_ROOT).click()
+
+
+def save_declaration(page):
+    """กด F12 [Save] ที่หน้าหัวใบขน แล้วรอหน้าโหลดใหม่"""
+    f = page.frame_locator('#detailfrm')
+    button = f.locator(SAVE_BTN)
+    try:
+        button.wait_for(state='visible', timeout=15_000)
+    except PWTimeout:                # ยังอยู่หน้าอื่น กลับไปหน้าหัวใบขนก่อน
+        page.locator(TREE_ROOT).click()
+        button.wait_for(state='visible')
+    click_and_wait_frame(page, button, timeout=60_000)
+    f.locator(REF_NO).wait_for(state='attached')
