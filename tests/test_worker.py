@@ -44,6 +44,7 @@ def test_creates_draft_saves_and_returns_ref_no(env, tmp_path, db):
     assert erp.state['failed'] == []
     [done] = erp.state['completed']
     assert done['refNo'] == 'QENX000000099'
+    assert done['url'].endswith('/decl?ImDclCtrl=16399'), 'ลิงก์หน้าใบขนต้องส่งกลับไปให้ ERP'
     assert done['fileName'] == 'TESTBL0001.xlsx'
     hr15, gr = engines(done['file'])
     assert hr15.startswith('HR15-') and gr.startswith('2GR-') and len(hr15) == len('HR15-1234567')
@@ -87,6 +88,7 @@ def test_result_is_resent_without_second_declaration(env, tmp_path):
     w.run(once=True)
     [done] = erp.state['completed']
     assert done['refNo'] == 'QENX000000099'
+    assert done['url'].endswith('/decl?ImDclCtrl=16399'), 'ส่งซ้ำก็ต้องมีลิงก์เดิม'
     assert netbay['saved'] == 1                      # ไม่สร้างใบขนซ้ำ
 
 

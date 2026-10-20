@@ -145,10 +145,11 @@ class Worker:
             done = self._done(task['id'])
             if done:     # ทำใน NETBAY ไปแล้วแต่ส่งผลกลับไม่ถึง — ส่งซ้ำ ไม่สร้างใบขนใบที่สอง
                 self.log('งานนี้สร้างใบขน %s ไปแล้ว — ส่งผลกลับอีกครั้ง' % done['ref_no'])
-                ref, excel = done['ref_no'], done['excel']
+                ref, excel, url = done['ref_no'], done['excel'], done.get('url', '')
             else:
                 ref, excel = self.make_draft(task, info)
-                self._mark_done(task['id'], ref, excel)
+                url = info.get('decl_url', '')
+                self._mark_done(task['id'], ref, excel, url)
         except DraftError as e:
             self.fail(task, str(e))
         except Exception as e:
@@ -157,12 +158,12 @@ class Worker:
                 msg += ' — ใบขน %s ถูกสร้างค้างไว้ใน NETBAY (ลบ หรือเปิดทำต่อเองได้)' % info['ref_no']
             self.fail(task, msg)
         else:
-            self.complete(task, ref, excel)
+            self.complete(task, ref, excel, url)
         finally:
             self.busy = None
             self.heartbeat()
 
-    def complete(self, task, ref, excel):
+    def complete(self, task, ref, excel, url=''):
         with open(excel, 'rb') as f:
             body = base64.b64encode(f.read()).decode()
         file = {'name': os.path.basename(excel), 'mimeType': XLSX_MIME, 'base64': body}
@@ -172,7 +173,8 @@ class Worker:
         for wait in self.retry_waits:
             time.sleep(wait)
             try:
-                self.erp.call('completeTask', taskId=task['id'], refNo=ref, file=file)
+                # url = หน้าใบขนใน NETBAY — ERP ทำ Ref No. เป็นลิงก์ให้ FAH กดเปิดตรวจ
+                self.erp.call('completeTask', taskId=task['id'], refNo=ref, url=url, file=file)
                 self.log('เสร็จ: ใบขน %s ส่งกลับ ERP แล้ว' % ref)
                 return
             except ErpError as e:
@@ -195,10 +197,11 @@ class Worker:
                 return d
         return None
 
-    def _mark_done(self, task_id, ref, excel):
+    def _mark_done(self, task_id, ref, excel, url=''):
         p = os.path.join(self.done_dir, re.sub(r'[^\w.-]', '_', task_id) + '.json')
         with open(p, 'w', encoding='utf-8') as f:
-            json.dump({'ref_no': ref, 'excel': excel, 'at': time.strftime('%Y-%m-%d %H:%M:%S')}, f, ensure_ascii=False)
+            json.dump({'ref_no': ref, 'excel': excel, 'url': url, 'at': time.strftime('%Y-%m-%d %H:%M:%S')},
+                      f, ensure_ascii=False)
 
     # ------------------------------------------------------------ งาน 1 ชิ้น
 

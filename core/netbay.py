@@ -36,7 +36,7 @@ def upload(csv_path, bl_no, totals, s, log=print, wait_close=None, save=False, o
     s = NetbaySettings  totals = ยอดรวมจาก netbay_csv.totals()
     save    = กด Save ให้เองหลังคำนวณใหม่ (worker ที่ไม่มีคนเฝ้าหน้าจอ)
     on_step = เรียก on_step(page) หลังจบแต่ละขั้น (worker ใช้ถ่ายภาพหน้าจอส่งขึ้น ERP)
-    info    = dict ที่จะได้ ref_no / decl_id ของใบขนที่สร้าง — มีค่าแม้งานล้มกลางทาง
+    info    = dict ที่จะได้ ref_no / decl_id / decl_url ของใบขนที่สร้าง — มีค่าแม้งานล้มกลางทาง
     คืน Reference No. ของใบขน
     """
     if not (s.url and s.username and s.password):
@@ -144,6 +144,8 @@ def new_declaration(page, import_url, s, bl_no, totals, info=None):
         frame = page.frame('detailfrm')
         m = re.search(r'ImDclCtrl=(\d+)', frame.url if frame else '')
         info['decl_id'] = m.group(1) if m else ''
+        # ลิงก์หน้าใบขนนี้ — ERP-KOLA ทำ Ref No. เป็นลิงก์ให้ FAH กดเปิดตรวจได้เลย
+        info['decl_url'] = frame.url if frame else ''
         if not info['ref_no']:
             raise NetbayError('ไม่พบ Reference No. ของใบขนที่สร้าง — หน้าเว็บ NETBAY อาจเปลี่ยน')
     f.locator('xpath=//*[@id="declTypeID"]/font/select').select_option(value=s.declaration_type)

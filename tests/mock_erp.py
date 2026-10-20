@@ -56,7 +56,8 @@ def create_mock_erp():
             if not (args.get('refNo') or '').strip():
                 return jsonify(ok=False, error='งาน DRAFT_ENTRY ต้องส่ง refNo กลับมา'), 400
             f = args.get('file') or {}
-            state['completed'].append({'taskId': task['id'], 'refNo': args['refNo'], 'fileName': f.get('name'),
+            state['completed'].append({'taskId': task['id'], 'refNo': args['refNo'], 'url': args.get('url'),
+                                       'fileName': f.get('name'),
                                        'file': base64.b64decode(f['base64']) if f.get('base64') else None})
             task['status'] = 'DONE'
             return ok({'ok': True})
