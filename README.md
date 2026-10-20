@@ -1,5 +1,10 @@
 # Invoice → CSV สำหรับ NETBAY (V3)
 
+> **ย้ายไปอยู่ใน ERP-KOLA แล้ว** — ใช้ `npm run worker:draft` ใน `ERP-KOLA/v2` แทน `worker.py`
+> (ปุ่ม "เปิด worker" ที่ งานคงค้าง → 3. Draft ใบขน · ลิงก์ Ref No. · เลขเครื่องอยู่ในตาราง `engine_numbers`)
+> คู่มือ: [ERP-KOLA/v2/docs/DRAFT-WORKER.md](https://github.com/7GHz-Dev/ERP-KOLA/blob/main/v2/docs/DRAFT-WORKER.md)
+> repo นี้เก็บไว้อ้างอิง (golden files ของ ERP สร้างจาก commit 59b4da8)
+
 โปรแกรมหน้าเว็บสำหรับงานนำเข้ารถ ทำงาน 4 ขั้น
 
 1. **อัปโหลดไฟล์ invoice** (Excel .xlsx) — รองรับ template `MSFZ`, `JTC`, `AICHI`, `HUAYO`, `JAN TRADING`
