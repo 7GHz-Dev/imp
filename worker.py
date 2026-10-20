@@ -228,12 +228,11 @@ class Worker:
         want = data.get('blNo') or ''
         if want and _norm_bl(bl) not in _norm_bl(want) and _norm_bl(want) not in _norm_bl(bl):
             raise DraftError('เลข BL ใน invoice (%s) ไม่ตรงกับงาน (%s) — ตรวจว่าแนบ Final Invoice ถูกงาน' % (bl, want))
-        unresolved = [w for w in a.warnings if 'พิกัด' in w]
-        if any('X' in line.tariff for line in a.lines):
-            raise DraftError('ยังหาพิกัดไม่ได้ — แก้ invoice ก่อน เพราะใบขนจะถูก Save อัตโนมัติ:\n- '
-                             + '\n- '.join(unresolved))
         for w in a.warnings:
             self.log('  เตือน: %s' % w)
+        missing = sum('X' in line.tariff for line in a.lines)
+        if missing:      # เหมือนโปรแกรมเดิม: ไม่พบพิกัด = XXXX  หลายพิกัด = 0000XXXX  ไปแก้ในใบขนเอง
+            self.log('  พิกัดยังไม่ครบ %d คัน — ใส่ XXXX ไว้ ต้องแก้ในใบขนบน NETBAY' % missing)
 
         run = pipeline.commit(path, self.s, self.db, original_name=name, reuse_bl=True)
         counts = collections.Counter(c['status'] for c in run['cars'])

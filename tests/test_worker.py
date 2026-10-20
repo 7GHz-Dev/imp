@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """worker.py กับ ERP-KOLA จำลอง + NETBAY จำลอง: รับงาน -> ตรวจ -> ออกเลข -> สร้างใบขน + Save -> ส่ง Ref No. กลับ"""
+import csv
 import dataclasses
 import io
 
@@ -98,20 +99,33 @@ def test_invoice_problems_go_back_to_paint(env, tmp_path, db):
     Workbook().save(blank)
     erp.add_task(blank)
     erp.add_task(make_msfz(str(tmp_path / 'other.xlsx'), cars=WITH_TARIFF), bl_no='OTHERBL999')
-    erp.add_task(make_msfz(str(tmp_path / 'notariff.xlsx')))
     pdf = tmp_path / 'FN.pdf'
     pdf.write_bytes(b'%PDF-1.4')
     erp.add_task(str(pdf))
-    for _ in range(4):
+    for _ in range(3):
         w.run(once=True)
 
     errors = [f['error'] for f in erp.state['failed']]
     assert 'ไม่รู้จักชนิดไฟล์' in errors[0]
     assert 'ไม่ตรงกับงาน (OTHERBL999)' in errors[1]
-    assert 'ยังหาพิกัดไม่ได้' in errors[2] and 'MERCEDES BENZ C200' in errors[2]
-    assert 'ต้องเป็นไฟล์ Excel' in errors[3]
+    assert 'ต้องเป็นไฟล์ Excel' in errors[2]
     assert erp.state['completed'] == []
     assert netbay['login'] is None and db.count() == 0   # ไม่แตะ NETBAY ไม่ออกเลข
+
+
+def test_missing_tariff_goes_in_as_xxxx_like_before(env, tmp_path, db):
+    w, erp, netbay = env
+    erp.add_task(make_msfz(str(tmp_path / 'FN.xlsx')))   # คันที่ 3 (MERCEDES BENZ C200) ไม่มีพิกัด
+    w.run(once=True)
+
+    assert erp.state['failed'] == []
+    [done] = erp.state['completed']
+    assert done['refNo'] == 'QENX000000099' and netbay['saved'] == 1
+    head, _, *cars = csv.reader(io.StringIO(netbay['upload'][1].decode('tis-620')))
+    tariff = head.index('ins_tariffCode')
+    assert [c[tariff] for c in cars] == ['000087032290', '000087032449', 'XXXX']
+    assert db.count() == 3
+    assert any('พิกัดยังไม่ครบ 1 คัน' in line for line in erp.state['heartbeats'][-1]['log'])
 
 
 def test_netbay_failure_reports_the_half_made_declaration(env, tmp_path, monkeypatch):
