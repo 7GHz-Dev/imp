@@ -13,7 +13,10 @@ IMPORTER = 'บริษัท เเม่สอด ฟรีโซน จำ�
 
 def create_mock():
     app = Flask(__name__)
-    state = {'login': None, 'decl': None, 'upload': None, 'refresh': 0, 'popups': [], 'recalc': [], 'saved': 0}
+    state = {'login': None, 'decl': None, 'upload': None, 'refresh': 0, 'popups': [], 'recalc': [], 'saved': 0,
+             'import_ok': True,
+             # ใบขนที่มีอยู่ในหน้ารายการ: เลขภายใน (ImDclCtrl) -> Reference No.
+             'declarations': {'16399': 'QENX000000099', '16300': 'QENX000000042'}, 'searched': []}
     ref_no = 'QENX000000099'
     # หน้าหัวใบขนจริงมีเลข Reference No. ตั้งแต่กด New และปุ่ม F12 [Save]
     save_bar = ('<input id="referenceNo" name="referenceNo" value="%s">'
@@ -38,7 +41,16 @@ def create_mock():
 
     @app.get('/import')
     def import_page():
-        return '''<html><body>
+        # หน้ารายการใบขน: ช่องค้นหา Reference No. (sREF) + ปุ่ม Search + แถวละใบ (statusPic<id> value=<ref>)
+        ref = request.args.get('sREF', '')
+        if 'sREF' in request.args:
+            state['searched'].append(ref)
+        rows = ''.join('<tr><td><img id="statusPic%s" value="%s" onclick="editID(\'%s\')"></td><td>%s</td></tr>' % (i, r, i, r)
+                       for i, r in state['declarations'].items() if not ref or r == ref)
+        listing = ('<form method="get" action="/import"><input type="text" id="invno1TXT" name="sREF">'
+                   '<input type="submit" id="refreshBTN" value="Search"></form><table><tbody>%s</tbody></table>'
+                   '<script>function editID(id) { location = "/workspace?SELITEM=ImDclCtrl:" + id; }</script>' % rows)
+        return '''<html><body>''' + listing + '''
 <button id="newBTN" onclick="document.getElementById('area').style.display='block';detailfrm.location='/decl?ImDclCtrl=16399'">New</button>
 <div id="area" style="display:none">
  <div id="outLineTree"><font><div><table><tbody><tr><td><div><font><b>
@@ -53,6 +65,7 @@ def create_mock():
 
     @app.get('/decl')
     def decl():
+        state['created'] = state.get('created', 0) + 1      # กด New = NETBAY สร้างใบขน 1 ใบ
         row = lambda cells: '<tr>%s</tr>' % ''.join('<td>%s</td>' % c for c in cells)
         rows = [
             row(['r1']),
@@ -128,7 +141,8 @@ function save() {
     def upload():
         f = request.files['file']
         state['upload'] = (f.filename, f.read())
-        return '''<html><body>uploaded
+        result = 'Success!! Please check your invoice' if state['import_ok'] else 'Error: invalid file format'
+        return '''<html><body>''' + result + '''
 <input id="refreshInvBTN" type="button" value="Refresh" onclick="fetch('/refresh').then(() => location = '/header')">
 </body></html>'''
 
@@ -140,6 +154,18 @@ function save() {
     @app.get('/header')
     def header():
         return '<html><body>header %s</body></html>' % save_bar
+
+    @app.get('/workspace')
+    def workspace():
+        decl_id = request.args['SELITEM'].split(':')[1]
+        return ('<html><body><div id="outLineTree">ROOT</div>'
+                '<iframe id="detailfrm" name="detailfrm" src="/edit?ImDclCtrl=%s"></iframe></body></html>' % decl_id)
+
+    @app.get('/edit')
+    def edit():
+        ref = state['declarations'][request.args['ImDclCtrl']]
+        return '<html><body><input id="referenceNo" value="%s"><input id="saveBTN" type="button" value="F12 [Save]">' \
+               '</body></html>' % ref
 
     @app.get('/save')
     def save():

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""worker.py กับ ERP-KOLA จำลอง + NETBAY จำลอง: รับงาน -> ตรวจ -> ออกเลข -> สร้างใบขน + Save -> ส่ง Ref No. กลับ"""
+"""worker.py กับ ERP-KOLA จำลอง + NETBAY จำลอง: รับงาน -> ตรวจ -> ออกเลข -> สร้างใบขน + Import CSV -> ส่ง Ref No. กลับ"""
 import csv
 import dataclasses
 import io
@@ -37,7 +37,7 @@ def engines(xlsx_bytes):
     return [ws['J%d' % r].value for r in (20, 21)]
 
 
-def test_creates_draft_saves_and_returns_ref_no(env, tmp_path, db):
+def test_creates_draft_imports_csv_and_returns_ref_no(env, tmp_path, db):
     w, erp, netbay = env
     erp.add_task(make_msfz(str(tmp_path / 'FN.xlsx'), cars=WITH_TARIFF))
     w.run(once=True)
@@ -45,15 +45,16 @@ def test_creates_draft_saves_and_returns_ref_no(env, tmp_path, db):
     assert erp.state['failed'] == []
     [done] = erp.state['completed']
     assert done['refNo'] == 'QENX000000099'
-    assert done['url'].endswith('/decl?ImDclCtrl=16399'), 'ลิงก์หน้าใบขนต้องส่งกลับไปให้ ERP'
+    assert done['url'] is None, 'URL ของ NETBAY พก UCODE ของ session — ห้ามส่งขึ้น ERP'
     assert done['fileName'] == 'TESTBL0001.xlsx'
     hr15, gr = engines(done['file'])
     assert hr15.startswith('HR15-') and gr.startswith('2GR-') and len(hr15) == len('HR15-1234567')
 
-    assert netbay['saved'] == 1
-    assert 'sent_to_customs' not in netbay
-    assert netbay['decl']['bl'] == 'TESTBL0001' and netbay['refresh'] == 1
+    assert netbay['created'] == 1 and netbay['decl']['bl'] == 'TESTBL0001'
     assert hr15.encode() in netbay['upload'][1]
+    # จบทันทีที่ Import สำเร็จ: ไม่ Refresh ไม่รวมยอด ไม่คำนวณใหม่ ไม่ Save ไม่ Send to Customs
+    assert (netbay['refresh'], netbay['popups'], netbay['recalc'], netbay['saved']) == (0, [], [], 0)
+    assert 'sent_to_customs' not in netbay
     assert db.count() == 2
 
     beats = erp.state['heartbeats']
@@ -61,7 +62,9 @@ def test_creates_draft_saves_and_returns_ref_no(env, tmp_path, db):
     assert any(b.get('shot') for b in beats)
     assert any(b['busy'] == 'Draft ใบขน MU2026100001' for b in beats)
     assert beats[-1]['offline'] is True
-    assert any('QENX000000099' in line for line in beats[-1]['log'])
+    log = beats[-1]['log']
+    assert any('Success!! Please check your invoice' in line for line in log)
+    assert any('QENX000000099' in line for line in log)
 
 
 def test_draft_again_for_same_bl_keeps_engine_numbers(env, tmp_path, db):
@@ -75,7 +78,7 @@ def test_draft_again_for_same_bl_keeps_engine_numbers(env, tmp_path, db):
     first, second = erp.state['completed']
     assert engines(first['file']) == engines(second['file'])
     assert db.count() == 2                          # ไม่ออกเลขเพิ่ม
-    assert netbay['saved'] == 2
+    assert netbay['created'] == 2
 
 
 def test_result_is_resent_without_second_declaration(env, tmp_path):
@@ -83,14 +86,13 @@ def test_result_is_resent_without_second_declaration(env, tmp_path):
     task = erp.add_task(make_msfz(str(tmp_path / 'FN.xlsx'), cars=WITH_TARIFF))
     erp.state['fail_complete'] = 2                   # ส่งผลกลับไม่ถึง ERP
     w.run(once=True)
-    assert erp.state['completed'] == [] and netbay['saved'] == 1
+    assert erp.state['completed'] == [] and netbay['created'] == 1
 
     task['status'] = 'QUEUED'                        # ERP ปล่อยงานที่ค้างให้หยิบใหม่
     w.run(once=True)
     [done] = erp.state['completed']
     assert done['refNo'] == 'QENX000000099'
-    assert done['url'].endswith('/decl?ImDclCtrl=16399'), 'ส่งซ้ำก็ต้องมีลิงก์เดิม'
-    assert netbay['saved'] == 1                      # ไม่สร้างใบขนซ้ำ
+    assert netbay['created'] == 1                    # ไม่สร้างใบขนซ้ำ
 
 
 def test_invoice_problems_go_back_to_paint(env, tmp_path, db):
@@ -120,7 +122,7 @@ def test_missing_tariff_goes_in_as_xxxx_like_before(env, tmp_path, db):
 
     assert erp.state['failed'] == []
     [done] = erp.state['completed']
-    assert done['refNo'] == 'QENX000000099' and netbay['saved'] == 1
+    assert done['refNo'] == 'QENX000000099' and netbay['created'] == 1
     head, _, *cars = csv.reader(io.StringIO(netbay['upload'][1].decode('tis-620')))
     tariff = head.index('ins_tariffCode')
     assert [c[tariff] for c in cars] == ['000087032290', '000087032449', 'XXXX']
@@ -128,14 +130,15 @@ def test_missing_tariff_goes_in_as_xxxx_like_before(env, tmp_path, db):
     assert any('พิกัดยังไม่ครบ 1 คัน' in line for line in erp.state['heartbeats'][-1]['log'])
 
 
-def test_netbay_failure_reports_the_half_made_declaration(env, tmp_path, monkeypatch):
-    w, erp, _ = env
+def test_import_without_success_message_fails_with_what_netbay_said(env, tmp_path, monkeypatch):
+    w, erp, netbay = env
     import core.netbay as nb
-
-    def broken(page, csv_path, log):
-        raise nb.NetbayError('ไม่พบปุ่ม Import')
-    monkeypatch.setattr(nb, 'attach_csv', broken)
+    monkeypatch.setattr(nb, 'IMPORT_TIMEOUT', 3)
+    netbay['import_ok'] = False
     erp.add_task(make_msfz(str(tmp_path / 'FN.xlsx'), cars=WITH_TARIFF))
     w.run(once=True)
     [f] = erp.state['failed']
-    assert 'ไม่พบปุ่ม Import' in f['error'] and 'QENX000000099' in f['error']
+    assert 'success please check your invoice' in f['error']
+    assert 'Error: invalid file format' in f['error']           # ข้อความบนหน้าจอ NETBAY ติดไปด้วย
+    assert 'QENX000000099' in f['error']                         # บอกใบขนที่สร้างค้างไว้
+    assert erp.state['completed'] == []

@@ -7,7 +7,8 @@ worker นี้รันบนเครื่องที่เปิด NETBAY
   1. ตรวจ invoice แบบหน้าเว็บ imp  ไม่ผ่าน = ส่งเหตุผลกลับไปที่งาน ไม่สร้างอะไร
   2. สุ่มเลขเครื่อง (data/engine.db) เติมลง Excel และสร้าง CSV  ->  output/<วันเวลา>_<BL>/
      chassis ที่เคยได้เลขใน BL เดียวกันใช้เลขเดิม (กดสร้าง Draft ซ้ำได้ เลขไม่เปลี่ยน)
-  3. สร้างใบขนใน NETBAY แนบ CSV คำนวณใหม่ แล้วกด Save  (ไม่กด Send to Customs)
+  3. สร้างใบขนใน NETBAY กรอกหัวใบขน แนบ CSV (Add Invoice -> Import)
+     จบเมื่อ NETBAY ขึ้น "success please check your invoice"  (ไม่กด Save / Send to Customs)
   4. ส่ง Reference No. และ invoice ที่เติมเลขเครื่องแล้วกลับเข้างานใน ERP
 
     python worker.py          รอรับงานไปเรื่อย ๆ  (ปิด: Ctrl+C)
@@ -145,11 +146,10 @@ class Worker:
             done = self._done(task['id'])
             if done:     # ทำใน NETBAY ไปแล้วแต่ส่งผลกลับไม่ถึง — ส่งซ้ำ ไม่สร้างใบขนใบที่สอง
                 self.log('งานนี้สร้างใบขน %s ไปแล้ว — ส่งผลกลับอีกครั้ง' % done['ref_no'])
-                ref, excel, url = done['ref_no'], done['excel'], done.get('url', '')
+                ref, excel = done['ref_no'], done['excel']
             else:
                 ref, excel = self.make_draft(task, info)
-                url = info.get('decl_url', '')
-                self._mark_done(task['id'], ref, excel, url)
+                self._mark_done(task['id'], ref, excel)
         except DraftError as e:
             self.fail(task, str(e))
         except Exception as e:
@@ -158,12 +158,12 @@ class Worker:
                 msg += ' — ใบขน %s ถูกสร้างค้างไว้ใน NETBAY (ลบ หรือเปิดทำต่อเองได้)' % info['ref_no']
             self.fail(task, msg)
         else:
-            self.complete(task, ref, excel, url)
+            self.complete(task, ref, excel)
         finally:
             self.busy = None
             self.heartbeat()
 
-    def complete(self, task, ref, excel, url=''):
+    def complete(self, task, ref, excel):
         with open(excel, 'rb') as f:
             body = base64.b64encode(f.read()).decode()
         file = {'name': os.path.basename(excel), 'mimeType': XLSX_MIME, 'base64': body}
@@ -173,8 +173,9 @@ class Worker:
         for wait in self.retry_waits:
             time.sleep(wait)
             try:
-                # url = หน้าใบขนใน NETBAY — ERP ทำ Ref No. เป็นลิงก์ให้ FAH กดเปิดตรวจ
-                self.erp.call('completeTask', taskId=task['id'], refNo=ref, url=url, file=file)
+                # ไม่ส่งลิงก์หน้าใบขน: URL ของ NETBAY พก UCODE ของ session นี้ (เปิดที่อื่นไม่ได้อยู่แล้ว)
+                # ERP ทำ Ref No. เป็นลิงก์ kola-netbay:// ให้ imp ในเครื่องคนกด login แล้วค้นหาเปิดเอง
+                self.erp.call('completeTask', taskId=task['id'], refNo=ref, file=file)
                 self.log('เสร็จ: ใบขน %s ส่งกลับ ERP แล้ว' % ref)
                 return
             except ErpError as e:
@@ -197,10 +198,10 @@ class Worker:
                 return d
         return None
 
-    def _mark_done(self, task_id, ref, excel, url=''):
+    def _mark_done(self, task_id, ref, excel):
         p = os.path.join(self.done_dir, re.sub(r'[^\w.-]', '_', task_id) + '.json')
         with open(p, 'w', encoding='utf-8') as f:
-            json.dump({'ref_no': ref, 'excel': excel, 'url': url, 'at': time.strftime('%Y-%m-%d %H:%M:%S')},
+            json.dump({'ref_no': ref, 'excel': excel, 'at': time.strftime('%Y-%m-%d %H:%M:%S')},
                       f, ensure_ascii=False)
 
     # ------------------------------------------------------------ งาน 1 ชิ้น
@@ -243,7 +244,7 @@ class Worker:
 
         run_dir = os.path.join(self.s.output_dir, run['run_id'])
         ref = netbay.upload(os.path.join(run_dir, run['csv']), run['bl_no'], run['totals'], self.s.netbay,
-                            log=self.log, wait_close=False, save=True, on_step=self.snap, info=info)
+                            log=self.log, wait_close=False, until='import', on_step=self.snap, info=info)
         return ref, os.path.join(run_dir, run['excel'])
 
 

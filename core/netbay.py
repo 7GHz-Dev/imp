@@ -3,15 +3,23 @@
 ส่ง CSV เข้า NETBAY ด้วย Playwright
 
 ขั้นตอนและ XPath ยกมาจาก csv_to_netbay() ของโปรแกรมเดิม (Selenium):
-  login -> หน้า import -> สร้างใบขนใหม่ (610) -> กรอกหัวใบขน -> แนบ CSV
-  -> รวมน้ำหนัก/อากร/VAT จากทุก invoice -> คำนวณใหม่
-หน้าเว็บ imp: หยุดก่อนกด Save ให้คนตรวจบนหน้าจอ แล้วปิดหน้าต่างเอง
-worker.py (save=True): กด F12 [Save] ให้เอง — ไม่กด Send to Customs ไม่ว่ากรณีใด
+  login -> หน้า import -> สร้างใบขนใหม่ (610) -> กรอกหัวใบขน -> แนบ CSV (Add Invoice -> Import)
+  -> Refresh -> รวมน้ำหนัก/อากร/VAT จากทุก invoice -> คำนวณใหม่
+upload(until='review')  หน้าเว็บ imp: ทำครบทุกขั้น แล้วหยุดให้คนตรวจและกด Save เอง
+upload(until='import')  worker.py: จบทันทีที่ NETBAY ขึ้น "success please check your invoice" หลัง Import
+open_declaration()      ลิงก์ Ref No. บน ERP-KOLA: login -> Import -> ค้นหา Reference No. -> เปิดใบขนนั้น
+ไม่มีขั้นไหนกด Save หรือ Send to Customs ให้
 """
 import datetime
+import os
 import re
+import shutil
+import socket
+import subprocess
+import tempfile
 import time
 
+from playwright.sync_api import Error as PWError
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
@@ -21,33 +29,38 @@ IMPORT_LINK = 'xpath=//*[@id="smoothmenu1"]/ul/li[3]/ul/li[5]/a'
 LOGIN_AREA = 'xpath=/html/body/map/area'
 UPLOAD_BTN = 'xpath=/html/body/table/tbody/tr[4]/td[2]/div/form/table/tbody/tr/td/table/tbody/tr[5]/td[2]/input[2]'
 REFRESH_BTN = '#refreshInvBTN'
-SAVE_BTN = '#saveBTN'                 # F12 [Save] ในหน้าหัวใบขน
 REF_NO = '#referenceNo'               # Reference No. ของใบขน เช่น QENX000000019 (มีตั้งแต่กด New)
+SEARCH_REF = 'input[name="sREF"]'     # หน้ารายการใบขน: ช่อง Reference No.
+SEARCH_BTN = '#refreshBTN'            # หน้ารายการใบขน: ปุ่ม Search
 BUSY_CELL = 'xpath=//*[@id="mybody"]/center/table/tbody/tr/td[2]'
 DONE_IMG = 'xpath=/html/body/center/table/tbody/tr/td[2]/center/img'
+IMPORT_OK = re.compile(r'success\W*(?:\w+\W+){0,3}?please\s+check\s+your\s+invoice', re.I)
+IMPORT_TIMEOUT = 180                  # วินาทีที่รอข้อความ success หลังกด Import (invoice ใหญ่ใช้เวลา)
 
 
 class NetbayError(Exception):
     pass
 
 
-def upload(csv_path, bl_no, totals, s, log=print, wait_close=None, save=False, on_step=None, info=None):
+def upload(csv_path, bl_no, totals, s, log=print, wait_close=None, until='review', on_step=None, info=None):
     """
     s = NetbaySettings  totals = ยอดรวมจาก netbay_csv.totals()
-    save    = กด Save ให้เองหลังคำนวณใหม่ (worker ที่ไม่มีคนเฝ้าหน้าจอ)
+    until   = 'review' ทำครบแล้วหยุดให้คนตรวจ | 'import' จบหลัง Import สำเร็จ (worker)
     on_step = เรียก on_step(page) หลังจบแต่ละขั้น (worker ใช้ถ่ายภาพหน้าจอส่งขึ้น ERP)
-    info    = dict ที่จะได้ ref_no / decl_id / decl_url ของใบขนที่สร้าง — มีค่าแม้งานล้มกลางทาง
+    info    = dict ที่จะได้ ref_no / decl_id ของใบขนที่สร้าง — มีค่าแม้งานล้มกลางทาง
     คืน Reference No. ของใบขน
     """
-    if not (s.url and s.username and s.password):
-        raise NetbayError('ยังไม่ได้ตั้งค่า url/username/password ของ NETBAY ใน config.ini')
+    _check(s)
     if wait_close is None:
-        wait_close = not s.headless
+        wait_close = until == 'review' and not s.headless
     info = {} if info is None else info
+    dialogs = info.setdefault('dialogs', [])
     step = on_step or (lambda page: None)
 
     def on_dialog(d):
-        log('  NETBAY แจ้ง: %s' % ' '.join(d.message.split())[:300])
+        msg = ' '.join(d.message.split())
+        dialogs.append(msg)
+        log('  NETBAY แจ้ง: %s' % msg[:300])
         d.accept()                                   # alert ทุกอันกด OK เหมือนโปรแกรมเดิม
 
     with sync_playwright() as p:
@@ -63,27 +76,29 @@ def upload(csv_path, bl_no, totals, s, log=print, wait_close=None, save=False, o
             new_declaration(page, import_url, s, bl_no, totals, info)
             log('  ใบขน Reference No. %s' % info['ref_no'])
             step(page)
-            log('แนบไฟล์ CSV (Add Invoice → Import → Refresh) ...')
-            attach_csv(page, csv_path, log)
+            log('แนบไฟล์ CSV (Add Invoice → Import) ...')
+            ok = import_csv(page, csv_path, dialogs)
+            log('  NETBAY: %s' % ok)
             step(page)
-            log('รวมน้ำหนัก / อากร / VAT จากทุก invoice ...')
-            fill_totals(page, log)
-            step(page)
-            log('คำนวณใหม่ (Re-avg / ภาษี / CIF) ...')
-            recalculate(page, log)
-            step(page)
-            if save:
-                log('กด Save ...')
-                save_declaration(page)
+            if until == 'review':
+                refresh_invoices(page, log)
+                log('รวมน้ำหนัก / อากร / VAT จากทุก invoice ...')
+                fill_totals(page, log)
                 step(page)
-                log('บันทึกใบขน %s แล้ว' % info['ref_no'])
-            else:
+                log('คำนวณใหม่ (Re-avg / ภาษี / CIF) ...')
+                recalculate(page, log)
+                step(page)
                 log('เสร็จแล้ว — ตรวจข้อมูลบนหน้าจอ NETBAY แล้วกด Save เอง จากนั้นปิดหน้าต่างเบราว์เซอร์')
             if wait_close:
                 page.wait_for_event('close', timeout=0)
         finally:
             browser.close()
     return info['ref_no']
+
+
+def _check(s):
+    if not (s.url and s.username and s.password):
+        raise NetbayError('ยังไม่ได้ตั้งค่า url/username/password ของ NETBAY ใน config.ini')
 
 
 def _launch(p, s):
@@ -144,8 +159,6 @@ def new_declaration(page, import_url, s, bl_no, totals, info=None):
         frame = page.frame('detailfrm')
         m = re.search(r'ImDclCtrl=(\d+)', frame.url if frame else '')
         info['decl_id'] = m.group(1) if m else ''
-        # ลิงก์หน้าใบขนนี้ — ERP-KOLA ทำ Ref No. เป็นลิงก์ให้ FAH กดเปิดตรวจได้เลย
-        info['decl_url'] = frame.url if frame else ''
         if not info['ref_no']:
             raise NetbayError('ไม่พบ Reference No. ของใบขนที่สร้าง — หน้าเว็บ NETBAY อาจเปลี่ยน')
     f.locator('xpath=//*[@id="declTypeID"]/font/select').select_option(value=s.declaration_type)
@@ -181,22 +194,55 @@ def pick_importer(f, s):
 
 
 def click_and_wait_frame(page, locator, timeout=30_000):
-    """คลิกแล้วรอให้ iframe detailfrm โหลดหน้าใหม่เสร็จ (ถ้าไม่โหลดหน้าใหม่ก็ไปต่อ)"""
+    """คลิกแล้วรอให้ iframe detailfrm โหลดหน้าใหม่เสร็จ (ไม่โหลดหน้าใหม่ หรือ NETBAY เปลี่ยน iframe ทั้งอัน ก็ไปต่อ)"""
     frame = page.locator('#detailfrm').element_handle().content_frame()
     try:
         with frame.expect_navigation(timeout=timeout):
             locator.click()
     except PWTimeout:
         pass
+    except PWError as e:
+        if 'detached' not in str(e):
+            raise
 
 
-def attach_csv(page, csv_path, log):
-    """Add Invoice -> File for import (เลือก CSV) -> Import -> Refresh"""
+def _frame_texts(page):
+    """ข้อความบนหน้าจอทุก frame — frame ที่กำลังโหลดใหม่หรือถูกถอดออกให้ข้ามไป"""
+    out = []
+    for fr in page.frames:
+        try:
+            out.append(fr.evaluate('() => document.body ? document.body.innerText : ""') or '')
+        except PWError:
+            pass
+    return out
+
+
+def import_csv(page, csv_path, dialogs=(), timeout=None):
+    """Add Invoice -> File for import (เลือก CSV) -> Import  แล้วรอจน NETBAY ขึ้น success please check your invoice"""
+    timeout = timeout or IMPORT_TIMEOUT
     f = page.frame_locator('#detailfrm')
     f.locator('#addInvoice').click()
     f.locator('xpath=//*[@id="maptypeDiv2"]/input').set_input_files(csv_path)
-    click_and_wait_frame(page, f.locator(UPLOAD_BTN))
-    refresh = f.locator(REFRESH_BTN)
+    try:
+        f.locator(UPLOAD_BTN).click(no_wait_after=True)
+    except PWError as e:          # หน้าเปลี่ยนระหว่างกด — ปุ่มถูกกดไปแล้ว ดูผลจากข้อความต่อ
+        if 'detached' not in str(e):
+            raise
+    end = time.time() + timeout
+    while time.time() < end:
+        for text in list(dialogs) + _frame_texts(page):
+            m = IMPORT_OK.search(text)
+            if m:
+                return ' '.join(m.group(0).split())
+        time.sleep(1)
+    seen = ' '.join(' | '.join(t for t in _frame_texts(page) if t.strip()).split())
+    raise NetbayError('ไม่เห็นข้อความ "success please check your invoice" หลังกด Import ภายใน %d วินาที'
+                      ' — หน้าจอขึ้นว่า: %s' % (timeout, seen[:300] or '-'))
+
+
+def refresh_invoices(page, log):
+    """กด Refresh ให้รายการ invoice ที่เพิ่ง Import ขึ้น แล้วกลับหน้าหัวใบขน"""
+    refresh = page.frame_locator('#detailfrm').locator(REFRESH_BTN)
     try:
         refresh.wait_for(state='visible', timeout=15_000)
     except PWTimeout:
@@ -257,14 +303,106 @@ def recalculate(page, log):
     page.locator(TREE_ROOT).click()
 
 
-def save_declaration(page):
-    """กด F12 [Save] ที่หน้าหัวใบขน แล้วรอหน้าโหลดใหม่"""
-    f = page.frame_locator('#detailfrm')
-    button = f.locator(SAVE_BTN)
+# ---------------------------------------------------------------- เปิดใบขนจาก Reference No.
+
+def find_declaration(page, list_url, ref):
+    """หน้ารายการใบขน: ค้นหาตาม Reference No.  คืนเลขภายในของใบขน (ImDclCtrl) หรือ None"""
+    page.goto(list_url)
+    page.locator(SEARCH_REF).fill(ref)
     try:
-        button.wait_for(state='visible', timeout=15_000)
-    except PWTimeout:                # ยังอยู่หน้าอื่น กลับไปหน้าหัวใบขนก่อน
-        page.locator(TREE_ROOT).click()
-        button.wait_for(state='visible')
-    click_and_wait_frame(page, button, timeout=60_000)
-    f.locator(REF_NO).wait_for(state='attached')
+        with page.expect_navigation(timeout=30_000):
+            page.locator(SEARCH_BTN).click()
+    except PWTimeout:
+        pass
+    hit = page.locator('img[id^="statusPic"][value="%s"]' % ref)
+    if hit.count() == 0:
+        return None
+    return hit.first.get_attribute('id')[len('statusPic'):]
+
+
+def _banner(page, message):
+    """แถบแจ้งด้านบนหน้าเว็บ NETBAY (alert ใช้ไม่ได้ เพราะ Playwright ปิด dialog เอง)"""
+    try:
+        page.evaluate('''m => { const d = document.createElement('div'); d.textContent = m;
+            d.style.cssText = 'position:sticky;top:0;z-index:9999;padding:12px;background:#b0402b;color:#fff;font:16px sans-serif';
+            (document.body || document.documentElement).prepend(d); }''', message[:500])
+    except PWError:
+        pass
+
+
+def _chrome_path(p):
+    """Google Chrome ที่ติดตั้งในเครื่อง ไม่มีก็ใช้ Chromium ของ Playwright"""
+    for path in ('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                 os.path.expandvars(r'%ProgramFiles%\Google\Chrome\Application\chrome.exe'),
+                 os.path.expandvars(r'%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe'),
+                 os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe'),
+                 shutil.which('google-chrome') or ''):
+        if path and os.path.isfile(path):
+            return path
+    return p.chromium.executable_path
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def open_declaration(ref, s, log=print, profiles_dir=None, keep_open=True):
+    """
+    ลิงก์ Ref No. บน ERP-KOLA: เปิด Chrome -> login -> Import -> ค้นหา Reference No. -> เปิดใบขนนั้น
+
+    เปิด Chrome ธรรมดา (โปรไฟล์ชั่วคราว) แล้วต่อเข้าไปคุมเฉพาะตอน login และค้นหา
+    เสร็จแล้วปล่อย — หน้าต่างเป็น Chrome ปกติ คนตรวจใช้ต่อได้ทุกอย่าง (dialog ยืนยันของ NETBAY ขึ้นตามปกติ)
+    คืนเลขภายในของใบขน หรือ None ถ้าไม่พบ (หน้ารายการขึ้นแถบแจ้งให้เห็น)
+    """
+    _check(s)
+    profiles_dir = profiles_dir or os.path.join(tempfile.gettempdir(), 'kola-netbay')
+    os.makedirs(profiles_dir, exist_ok=True)
+    for name in os.listdir(profiles_dir):          # โปรไฟล์ของรอบก่อน ๆ ที่เกิน 1 วัน
+        path = os.path.join(profiles_dir, name)
+        if os.path.isdir(path) and os.path.getmtime(path) < time.time() - 86400:
+            shutil.rmtree(path, ignore_errors=True)
+    profile = tempfile.mkdtemp(prefix='p-', dir=profiles_dir)
+    port = _free_port()
+
+    with sync_playwright() as p:
+        args = [_chrome_path(p), '--remote-debugging-port=%d' % port, '--user-data-dir=' + profile,
+                '--no-first-run', '--no-default-browser-check',
+                '--unsafely-treat-insecure-origin-as-secure=' + s.url]
+        args += ['--headless=new'] if s.headless else ['--start-maximized']
+        proc = subprocess.Popen(args + ['about:blank'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        browser = page = None
+        try:
+            for _ in range(60):
+                try:
+                    browser = p.chromium.connect_over_cdp('http://127.0.0.1:%d' % port)
+                    break
+                except PWError:
+                    time.sleep(0.25)
+            if browser is None:
+                raise NetbayError('เปิด Chrome ไม่สำเร็จ')
+            context = browser.contexts[0]
+            context.set_default_timeout(30_000)
+            page = context.pages[0] if context.pages else context.new_page()
+            log('login NETBAY ...')
+            list_url = login(page, s)
+            log('ค้นหา Reference No. %s ...' % ref)
+            decl_id = find_declaration(page, list_url, ref)
+            if decl_id:
+                page.evaluate('id => editID(id)', decl_id)
+                page.locator('#detailfrm').wait_for(state='attached')
+                log('เปิดใบขน %s แล้ว' % ref)
+            else:
+                _banner(page, 'ไม่พบใบขน Reference No. %s ใน NETBAY — ค้นหาเองอีกครั้งในหน้านี้' % ref)
+                log('ไม่พบใบขน %s' % ref)
+            return decl_id
+        except Exception as e:      # เปิดจากลิงก์ไม่มีหน้าต่าง Terminal — บอกเหตุผลบนหน้าจอ Chrome
+            if page is not None:
+                _banner(page, 'เปิดใบขน %s ไม่สำเร็จ: %s' % (ref, e))
+            raise
+        finally:
+            if browser is not None:
+                browser.close()           # ต่อแบบ CDP: แค่ปล่อยการควบคุม หน้าต่าง Chrome ยังอยู่
+            if not keep_open:
+                proc.terminate()

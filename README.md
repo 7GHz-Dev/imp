@@ -116,11 +116,13 @@ PAINT กด **สร้าง Draft** ที่ ERP-KOLA → งานคงค
 1. ตรวจ invoice ตามหัวข้อ "ตรวจก่อนสร้างไฟล์" + เลข BL ต้องตรงกับงาน
    (ไม่พบพิกัด = `XXXX` / เจอหลายพิกัด = `0000XXXX` เหมือนเดิม — แก้ในใบขนบน NETBAY)
 2. สุ่มเลขเครื่อง เติมลง Excel และสร้าง CSV (`output/`) — chassis ที่เคยได้เลขใน BL เดียวกันใช้เลขเดิม
-3. สร้างใบขนใน NETBAY แนบ CSV รวมยอด คำนวณใหม่ แล้ว **กด Save** (ไม่กด Send to Customs)
+3. สร้างใบขนใน NETBAY กรอกหัวใบขน แนบ CSV (Add Invoice → Import)
+   **จบเมื่อ NETBAY ขึ้น "success please check your invoice"** — ไม่กด Save / Send to Customs
 4. ส่ง **Reference No.** (เช่น `QENX000000019`) และ FN Invoice ที่เติมเลขเครื่องแล้วกลับเข้างาน
 
 ไม่ผ่านข้อไหน งานใน ERP ขึ้น "สร้าง Draft ไม่สำเร็จ" พร้อมเหตุผล แก้ไฟล์แล้วกดสร้างใหม่ได้
-ถ้า NETBAY ล้มกลางทาง เหตุผลจะบอกเลขใบขนที่สร้างค้างไว้
+ถ้า NETBAY ล้มกลางทาง หรือไม่ขึ้นข้อความ success ภายใน 3 นาที เหตุผลจะบอกเลขใบขนที่สร้างค้างไว้
+และข้อความที่ NETBAY แสดงอยู่
 
 ตั้งค่าใน `config.ini`
 
@@ -132,6 +134,21 @@ api_key = <WORKER_API_KEY ตัวเดียวกับบน Vercel>
 
 เปิดด้วย `run_worker.bat` (หรือ `python worker.py`, ทดสอบ 1 งาน: `--once`)
 แท็บ Draft ใบขนบน ERP บอกว่า worker ออนไลน์อยู่ไหม ทำงานไหนอยู่
+
+## เปิดใบขนจากเลข Ref No. บน ERP-KOLA
+
+เลข Ref No. ในทุกหน้าของ ERP (รวมหน้าตรวจ Draft ของ FAH) เป็นลิงก์ `kola-netbay://open?ref=<Ref No.>`
+กดแล้ว imp ในเครื่องนั้นเปิด Chrome → login → Import → ค้นหา Ref No. → เปิดใบขน แล้วปล่อยหน้าต่างไว้ให้ตรวจต่อ
+(ลิงก์ตรงไปหน้าใบขนใช้ไม่ได้ เพราะ NETBAY ผูก session ไว้กับเบราว์เซอร์ที่ login)
+
+ติดตั้งครั้งเดียวต่อเครื่อง — เครื่องต้องมี imp + `config.ini` ที่ใส่ user/pass NETBAY และอยู่ในเครือข่ายออฟฟิศ
+
+| เครื่อง | ติดตั้ง |
+|---|---|
+| Windows | ดับเบิลคลิก `install\windows-netbay-launcher.cmd` |
+| Mac | `bash install/mac-netbay-launcher.sh` |
+
+ทดสอบโดยไม่ผ่าน ERP: `python open_ref.py QENX000000020` · log: `work/open_ref.log`
 
 ## โครงสร้าง
 
@@ -147,6 +164,8 @@ core/netbay_csv.py   mapping → CSV
 core/pipeline.py     รวมขั้นตอน ตรวจ → สุ่มเลข → เขียนไฟล์
 core/netbay.py       ส่งเข้า NETBAY (Playwright)
 worker.py            รับงานสร้าง Draft ใบขนจาก ERP-KOLA
+open_ref.py          เปิดใบขนจาก Ref No. (ลิงก์ kola-netbay:// บน ERP-KOLA)
+install/             ตัวติดตั้งลิงก์ kola-netbay:// (Mac / Windows)
 tools/import_db.py   นำเข้าเลขเครื่องเดิมจาก SQL Server export
 ```
 
